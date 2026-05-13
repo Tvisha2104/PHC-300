@@ -1,26 +1,4 @@
-"""
-Solar Drone Flight Optimization — Fully Integrated with ANN-based MPPT
-Generates and saves all plots automatically.
 
-FIXES applied vs original:
-  1. Training data: duty cycle now derived from physics-consistent V_mpp/V_oc
-     ratio, giving the ANN a learnable signal instead of noise.
-  2. Label scaling: removed scaler_y — sigmoid output already covers [0,1].
-  3. Solar power: mppt_power capped at raw_power via realistic MPPT efficiency.
-  4. Drone base power reduced to 12 W (consistent with panel size).
-  5. ANN training stability:
-       a. Dropout removed — replaced with L2 regularisation. Dropout on a
-          narrow-range regression target causes the loss-spike-then-oscillate
-          pattern seen at epoch 2.
-       b. Learning rate lowered to 3e-4 to prevent overshooting.
-       c. Larger batch (128) smooths gradient estimates.
-  8. Panel angle: replaced unconstrained optimiser (which always hits the 5°
-     lower bound because cos(angle) is strictly monotone) with sun-elevation
-     geometry: tilt = f(irradiance) matching the sun angle, then fine-tuned
-     ±10° for maximum solar harvest.  Produces physically correct 20–55° range.
-  9. Temperature now drifts during simulation (panel heats up ~8°C over 30 min)
-     so the ANN duty cycle responds dynamically instead of being a flat line.
-"""
 
 import numpy as np
 import matplotlib
@@ -33,51 +11,40 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 
-# ═══════════════════════════════════════════════════════════
-# MPPT_ANN CLASS  — fixed training data + removed y-scaler
-# ═══════════════════════════════════════════════════════════
+
 class MPPT_ANN:
     def __init__(self):
         self.model    = None
         self.scaler_X = StandardScaler()
-        # FIX 2: no scaler_y — sigmoid output is already in [0,1]
+       
         self.history  = None
 
     def generate_training_data(self, n_samples=5000):
-        """
-        FIX 1: duty cycle is now the physics-correct V_mpp / V_oc ratio,
-        which depends only on temperature (and a small irradiance correction).
-        This gives the ANN a clean, learnable mapping instead of the previous
-        V_mpp / random_voltage which was essentially noise.
-        """
+       
         np.random.seed(42)
         irradiance  = np.random.uniform(200, 1000, n_samples)
         temperature = np.random.uniform(-20,  60,  n_samples)
-        # Operating voltage and current at MPP — physically consistent
+        
         Voc      = 21.5
         Isc      = 5.0
         G_norm   = irradiance / 1000
         T_factor = 1 - 0.004 * (temperature - 25)
 
-        V_mpp = 0.77 * Voc * T_factor                   # MPP voltage
-        I_mpp = Isc  * G_norm * T_factor                # MPP current
+        V_mpp = 0.77 * Voc * T_factor                   
+        I_mpp = Isc  * G_norm * T_factor              
 
-        # Duty cycle = V_mpp / V_oc  (boost converter relationship)
         duty_cycle = V_mpp / Voc
         duty_cycle = np.clip(duty_cycle, 0.1, 0.9)
-        duty_cycle += np.random.normal(0, 0.01, n_samples)   # small noise
+        duty_cycle += np.random.normal(0, 0.01, n_samples)  
         duty_cycle = np.clip(duty_cycle, 0.1, 0.9)
 
-        # Features: irradiance, temperature, V_mpp, I_mpp
+     
         X = np.column_stack([irradiance, temperature, V_mpp, I_mpp])
         y = duty_cycle.reshape(-1, 1)
         return X, y
 
     def build_model(self, input_dim=4):
-        # FIX 5a: Removed Dropout — duty cycle target has very low variance
-        # (~0.1 range), so dropout randomly zeroes activations and causes the
-        # wild loss oscillations seen in training.  L2 regularisation provides
-        # sufficient regularisation without instability.
+     
         reg = keras.regularizers.l2(1e-4)
         model = keras.Sequential([
             layers.Input(shape=(input_dim,)),
@@ -87,8 +54,7 @@ class MPPT_ANN:
             layers.Dense(32,  activation='relu', kernel_regularizer=reg, name='hidden4'),
             layers.Dense(1,   activation='sigmoid', name='output'),
         ])
-        # FIX 5b: LR reduced to 3e-4 — with 5 k samples and a narrow target
-        # range, 1e-3 causes overshooting and the characteristic spike at epoch 2.
+     
         model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=3e-4),
             loss='mse', metrics=['mae'])
@@ -98,7 +64,7 @@ class MPPT_ANN:
         X_train, X_val, y_train, y_val = train_test_split(
             X, y, test_size=validation_split, random_state=42)
 
-        # Only scale inputs
+    
         X_train_s = self.scaler_X.fit_transform(X_train)
         X_val_s   = self.scaler_X.transform(X_val)
 
@@ -110,11 +76,11 @@ class MPPT_ANN:
             monitor='val_loss', factor=0.5, patience=10, min_lr=1e-6)
 
         self.history = self.model.fit(
-            X_train_s, y_train,          # y is already in [0,1]
+            X_train_s, y_train,          
             validation_data=(X_val_s, y_val),
             epochs=epochs, batch_size=batch_size,
             callbacks=[early_stopping, reduce_lr],
-            verbose=0)                   # quiet training
+            verbose=0)                
 
         best_loss = min(self.history.history['val_loss'])
         print(f"  Training done — best val_loss: {best_loss:.6f}  "
@@ -156,18 +122,12 @@ class MPPT_ANN:
             self.model.save(filepath)
             print(f"  Model saved → {filepath}")
 
-
-# ═══════════════════════════════════════════════════════════
-# SOLAR MODEL  — fixed power calculation + ANN call signature
-# ═══════════════════════════════════════════════════════════
 class SolarModel:
     def __init__(self, mppt_ann):
         self.mppt       = mppt_ann
-        # FIX 7: panel area raised to 0.15 m² (a realistic folding wing panel
-        # on a 300 g fixed-wing/hybrid drone).  0.08 m² at 700 W/m² × 18% eff
-        # gives only ~10 W before losses, which can never beat even a 12 W hover.
+     
         self.panel_area = 0.15
-        self.efficiency = 0.20       # modern SunPower cells ~20 %
+        self.efficiency = 0.20      
         self.Voc        = 21.5
         self.Isc        = 5.0
         self.temp_coeff = 0.004
@@ -177,32 +137,26 @@ class SolarModel:
         V_mpp    = 0.77 * self.Voc  * T_factor
         I_mpp    = self.Isc * (irradiance / 1000) * T_factor
 
-        # FIX 1 (call-site): pass V_mpp, I_mpp instead of random operating V/I
         duty = self.mppt.predict_duty_cycle(irradiance, temperature, V_mpp, I_mpp)
 
         angle_factor = np.cos(np.radians(panel_angle_deg))
         cloud_factor = 1 - cloud_cover * 0.85
 
-        # Raw theoretical max power from panel
+    
         raw_power = (irradiance * self.panel_area
                      * self.efficiency * T_factor
                      * angle_factor * cloud_factor)
 
-        # FIX 3: MPPT efficiency modelled as linear in duty proximity to ideal.
-        # duty ≈ 0.77 is ideal (V_mpp/V_oc); scale ±efficiency around that.
-        # Cap at raw_power so we never exceed physical maximum.
+      
         mppt_efficiency = 0.85 + 0.12 * (1 - abs(duty - 0.77) / 0.77)
         mppt_power      = min(raw_power * mppt_efficiency, raw_power)
         return max(0.0, mppt_power), duty
 
 
-# ═══════════════════════════════════════════════════════════
-# DRONE POWER MODEL  — FIX 4: realistic base power for panel size
-# ═══════════════════════════════════════════════════════════
+
 class DronePowerModel:
     def __init__(self):
-        # FIX 4: 18 W base was too high for an 0.08 m² panel.
-        # A ~250 g micro-drone hovers at ~10-12 W realistically.
+    
         self.base_hover_power = 12.0
 
     def total_power(self, speed_ms, altitude_m, payload_g=0):
@@ -212,10 +166,6 @@ class DronePowerModel:
         hover          = self.base_hover_power * payload_factor * alt_factor
         return hover * 0.85 + drag_power
 
-
-# ═══════════════════════════════════════════════════════════
-# BATTERY MODEL  — unchanged
-# ═══════════════════════════════════════════════════════════
 class BatteryModel:
     def __init__(self, capacity_wh=80, initial_soc=1.0):
         self.capacity_wh   = capacity_wh
@@ -235,10 +185,6 @@ class BatteryModel:
     def is_depleted(self):
         return self.soc <= self.min_soc
 
-
-# ═══════════════════════════════════════════════════════════
-# FLIGHT OPTIMIZER  — unchanged logic, benefits from fixes above
-# ═══════════════════════════════════════════════════════════
 class FlightOptimizer:
     def __init__(self, mppt_ann):
         self.solar = SolarModel(mppt_ann)
@@ -253,25 +199,15 @@ class FlightOptimizer:
         return round(float(res.x[0]), 2)
 
     def optimize_panel_angle(self, irr, temp, cloud, alt=100, payload_g=200):
-        # Physical reality: on a solar drone the panel tilt is set to match the
-        # sun's elevation angle so irradiance hits the panel perpendicularly.
-        # For a drone flying at mid-latitudes during midday the sun is typically
-        # 45–70° above the horizon, so the optimal panel tilt (measured from
-        # horizontal) = 90° − sun_elevation, giving roughly 20–45°.
-        # We model sun elevation as a function of irradiance:
-        #   high irradiance (>800) → sun high → shallow tilt (~20°)
-        #   moderate (400–800)     → sun mid  → medium tilt (~35°)
-        #   low (<400)             → sun low  → steep tilt  (~50°)
-        # This is a standard solar geometry relationship and produces a
-        # meaningful, non-degenerate angle that varies with conditions.
+       
         if irr >= 800:
             base_angle = 20.0
         elif irr >= 400:
-            base_angle = 20.0 + (800 - irr) / 400 * 25.0   # 20°→45°
+            base_angle = 20.0 + (800 - irr) / 400 * 25.0   
         else:
-            base_angle = 45.0 + (400 - irr) / 400 * 10.0   # 45°→55°
+            base_angle = 45.0 + (400 - irr) / 400 * 10.0   
 
-        # Fine-tune ±10° around the base using solar power as the criterion
+
         best_angle = base_angle
         best_power = -np.inf
         for delta in np.linspace(-10, 10, 21):
@@ -304,10 +240,6 @@ class FlightOptimizer:
             'solar_surplus':       solar_pwr >= demand,
         }
 
-
-# ═══════════════════════════════════════════════════════════
-# FLIGHT SIMULATION
-# ═══════════════════════════════════════════════════════════
 def simulate_flight(conditions, mppt_ann, duration_s=3600, dt=10):
     solar_model = SolarModel(mppt_ann)
     drone_model = DronePowerModel()
@@ -326,9 +258,7 @@ def simulate_flight(conditions, mppt_ann, duration_s=3600, dt=10):
             + np.random.normal(0, 0.03))
         irr = float(np.clip(irr, 100, 1200))
 
-        # FIX 9: temperature drifts realistically during flight.
-        # Panel heats up under sun (+8°C over 30 min) then stabilises.
-        # This drives meaningful duty-cycle variation since duty ∝ T_factor.
+   
         base_temp = conditions.get('temperature', 25)
         temp = base_temp + 8.0 * (1 - np.exp(-t / 1800)) \
                + np.random.normal(0, 1.0)
@@ -356,10 +286,6 @@ def simulate_flight(conditions, mppt_ann, duration_s=3600, dt=10):
     return (np.array(time_arr),  np.array(solar_arr),
             np.array(demand_arr), np.array(soc_arr),  np.array(duty_arr))
 
-
-# ═══════════════════════════════════════════════════════════
-# PLOT ALL RESULTS
-# ═══════════════════════════════════════════════════════════
 def plot_results(time, solar, demand, soc, duty,
                  save_path='flight_optimization_ann.png'):
     fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
@@ -403,29 +329,26 @@ def plot_results(time, solar, demand, soc, duty,
     print(f"  Flight optimization plot saved → {save_path}")
 
 
-# ═══════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════
+
 def main():
     print("=" * 60)
     print("  ANN-MPPT Solar Drone Flight Optimizer  [FIXED]")
     print("=" * 60)
 
-    # Step 1 — Train ANN
+   
     print("\n[1/4] Training ANN-MPPT model...")
     mppt = MPPT_ANN()
     X, y = mppt.generate_training_data(n_samples=5000)
     mppt.train(X, y, epochs=200, batch_size=128)
     mppt.save_model('./mppt_model.keras')
 
-    # Step 2 — Training plots
+ 
     print("\n[2/4] Saving training history plots...")
     mppt.plot_training_history(save_path='training_history.png')
 
-    # Step 3 — Optimise and simulate
     print("\n[3/4] Optimising flight and running simulation...")
     conditions = {
-        'irradiance':  900,   # bright-day scenario; panel now sized to yield surplus
+        'irradiance':  900,   
         'temperature':  28,
         'altitude':    100,
         'payload_g':   150,
