@@ -1,21 +1,4 @@
-"""
-ANN-based MPPT (Maximum Power Point Tracking) for Drone Solar Panels
-This code implements a neural network to predict and track the maximum power point
-of solar panels mounted on drones under varying conditions.
 
-FIXES applied:
-  1. Training data: duty = V_mpp/V_oc (physics-correct) instead of
-     V_mpp/random_voltage (noise). Features changed to [irr, temp, V_mpp, I_mpp].
-  2. Removed scaler_y: sigmoid output already in [0,1]; StandardScaler on a
-     bounded target corrupted predictions regardless of training quality.
-  3. Removed Dropout: replaced with L2 regularisation. Dropout on a narrow-range
-     regression target causes loss spikes and oscillation.
-  4. Learning rate lowered 1e-3 → 3e-4; batch size 32 → 128 for stable gradients.
-  5. predict_duty_cycle: signature updated to (irr, temp, v_mpp, i_mpp);
-     inverse_transform removed (no scaler_y).
-  6. simulate_mppt_control: voltage/current replaced by physics-derived V_mpp/I_mpp
-     so predictions are consistent with how the model was trained.
-"""
 
 import numpy as np
 import matplotlib
@@ -32,7 +15,7 @@ class MPPT_ANN:
     def __init__(self):
         self.model    = None
         self.scaler_X = StandardScaler()
-        # FIX 2: scaler_y removed — sigmoid output covers [0,1] directly
+
         self.history  = None
 
     def generate_training_data(self, n_samples=5000):
@@ -51,14 +34,13 @@ class MPPT_ANN:
         G_norm   = irradiance / 1000
         T_factor = 1 - 0.004 * (temperature - 25)
 
-        V_mpp = 0.77 * Voc * T_factor          # MPP voltage
-        I_mpp = Isc  * G_norm * T_factor        # MPP current
+        V_mpp = 0.77 * Voc * T_factor        
+        I_mpp = Isc  * G_norm * T_factor       
 
-        # FIX 1: duty = V_mpp / V_oc  (boost-converter relationship)
-        # Previously was V_mpp / random_voltage → pure noise, unlearnable.
+      
         duty_cycle  = V_mpp / Voc
         duty_cycle  = np.clip(duty_cycle, 0.1, 0.9)
-        duty_cycle += np.random.normal(0, 0.01, n_samples)   # realistic noise
+        duty_cycle += np.random.normal(0, 0.01, n_samples)  
         duty_cycle  = np.clip(duty_cycle, 0.1, 0.9)
 
         X = np.column_stack([irradiance, temperature, V_mpp, I_mpp])
@@ -69,9 +51,7 @@ class MPPT_ANN:
         """
         ANN for MPPT: 4 inputs → hidden layers → 1 output (duty cycle).
         """
-        # FIX 3: L2 regularisation replaces Dropout.
-        # Dropout on narrow-range regression ([0.1,0.9]) randomly zeroes
-        # activations and causes the loss-spike/oscillation seen in training.
+       
         reg = keras.regularizers.l2(1e-4)
 
         model = keras.Sequential([
@@ -80,11 +60,10 @@ class MPPT_ANN:
             layers.Dense(128, activation='relu', kernel_regularizer=reg, name='hidden2'),
             layers.Dense(64,  activation='relu', kernel_regularizer=reg, name='hidden3'),
             layers.Dense(32,  activation='relu', kernel_regularizer=reg, name='hidden4'),
-            # sigmoid maps directly to [0,1] — matches duty cycle range
+       
             layers.Dense(1, activation='sigmoid', name='output'),
         ])
 
-        # FIX 4: LR 1e-3 → 3e-4 stops overshooting on the first few epochs
         model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=3e-4),
             loss='mse',
@@ -97,7 +76,7 @@ class MPPT_ANN:
         X_train, X_val, y_train, y_val = train_test_split(
             X, y, test_size=validation_split, random_state=42)
 
-        # FIX 2: only scale inputs, not labels
+
         X_train_s = self.scaler_X.fit_transform(X_train)
         X_val_s   = self.scaler_X.transform(X_val)
 
@@ -109,10 +88,10 @@ class MPPT_ANN:
             monitor='val_loss', factor=0.5, patience=10, min_lr=1e-6)
 
         self.history = self.model.fit(
-            X_train_s, y_train,       # y already in [0,1] — no scaler needed
+            X_train_s, y_train,     
             validation_data=(X_val_s, y_val),
             epochs=epochs,
-            batch_size=batch_size,    # FIX 4: larger batch → smoother gradients
+            batch_size=batch_size,   
             callbacks=[early_stopping, reduce_lr],
             verbose=1
         )
@@ -192,16 +171,16 @@ def simulate_mppt_control(mppt_ann):
     time_steps = 100
     time = np.linspace(0, 60, time_steps)
 
-    # Varying irradiance (clouds, altitude changes)
+  
     irradiance  = 800 + 200 * np.sin(2 * np.pi * time / 30) \
                   + np.random.normal(0, 30, time_steps)
     irradiance  = np.clip(irradiance, 200, 1000)
 
-    # Varying temperature (panel heats up then stabilises)
+   
     temperature = 25 + 8.0 * (1 - np.exp(-time / 30)) \
                   + np.random.normal(0, 1.5, time_steps)
 
-    # FIX 6: derive V_mpp / I_mpp from physics instead of random V/I
+
     T_factor = 1 - 0.004 * (temperature - 25)
     V_mpp_arr = 0.77 * Voc * T_factor
     I_mpp_arr = Isc * (irradiance / 1000) * T_factor
@@ -214,12 +193,10 @@ def simulate_mppt_control(mppt_ann):
             irradiance[i], temperature[i], V_mpp_arr[i], I_mpp_arr[i])
         duty_cycles.append(dc)
 
-        # Power at MPP: P = V_mpp × I_mpp × MPPT_efficiency
         mppt_eff = 0.85 + 0.12 * (1 - abs(dc - 0.77) / 0.77)
         power    = V_mpp_arr[i] * I_mpp_arr[i] * mppt_eff
         power_output.append(max(0.0, power))
 
-    # ── Plot ──────────────────────────────────────────────────
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
     fig.suptitle('ANN-MPPT Flight Simulation', fontsize=15, fontweight='bold')
 
@@ -258,25 +235,25 @@ def main():
 
     mppt = MPPT_ANN()
 
-    # 1 — Generate training data
+   
     print("\n1. Generating training data...")
     X, y = mppt.generate_training_data(n_samples=5000)
     print(f"   {X.shape[0]} samples | Features: Irradiance, Temperature, V_mpp, I_mpp")
     print(f"   Target: Optimal Duty Cycle (V_mpp / V_oc)")
 
-    # 2 — Train
+
     print("\n2. Training ANN model...")
     mppt.train(X, y, epochs=200, batch_size=128)
 
-    # 3 — Training plot
+
     print("\n3. Plotting training history...")
     mppt.plot_training_history()
 
-    # 4 — Save
+
     print("\n4. Saving model...")
     mppt.save_model()
 
-    # 5 — Test predictions (using physics-derived V_mpp / I_mpp)
+    
     print("\n5. Testing predictions...")
     Voc, Isc = 21.5, 5.0
 
@@ -291,7 +268,7 @@ def main():
     test("Low irradiance, cold temp",    300, -10)
     test("Medium irradiance, hot temp",  600,  45)
 
-    # 6 — Simulate
+
     print("\n6. Running flight simulation...")
     simulate_mppt_control(mppt)
 
